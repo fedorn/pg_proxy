@@ -213,22 +213,30 @@ void PostgreSQLProxy::forwardData(int fd) {
     }
         // Socket received data
     else if (result > 0) {
-        if (client_to_server.find(fd) != client_to_server.end()) {
+        if (auto itcs = client_to_server.find(fd); itcs != client_to_server.end()) {
             std::cout << "send to server " << client_to_server[fd] << " from client " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
-            send(client_to_server[fd], buffer, result, MSG_NOSIGNAL);
-            // Log queries
-            // TODO: ignore startup message that doesn't have initial byte
-            // TODO: log to file
-            // TODO: make sure &buffer[5] ends with \0
-            if (buffer[0] == 'Q') {
-                std::cout << "Query: ===" << &buffer[5] << "===" << std::endl;
-                logFile << &buffer[5] << std::endl;
+            send(itcs->second, buffer, result, MSG_NOSIGNAL);
+            // Ignore startup message that doesn't have initial byte
+            if (auto itsi = sent_initial.find(fd); itsi != sent_initial.end()) {
+                // Log queries
+                if (buffer[0] == 'Q') {
+                    if (result < 5) {
+                        std::cerr << "Wrong Query message format." << std::endl;
+                    } else {
+                        buffer[result] = 0;  // Make sure &buffer[5] ends with \0
+                        std::cout << "Query: ===" << &buffer[5] << "===" << std::endl;
+                        logFile << &buffer[5] << std::endl;
+                    }
+                }
             }
-        } else if (server_to_client.find(fd) != server_to_client.end()) {
+            else {
+                sent_initial.insert(fd);
+            }
+        } else if (auto itsc = server_to_client.find(fd); itsc != server_to_client.end()) {
             std::cout << "send to client " << server_to_client[fd] << " from server " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
-            send(server_to_client[fd], buffer, result, MSG_NOSIGNAL);
+            send(itsc->second, buffer, result, MSG_NOSIGNAL);
         } else {
             std::cerr << "Unknown descriptor." << std::endl;
         }

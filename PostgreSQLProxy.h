@@ -2,6 +2,7 @@
 #define POSTGRESQLPROXY_H
 
 #include <unordered_map>
+#include <unordered_set>
 #include <csignal>
 #include <fstream>
 
@@ -11,6 +12,7 @@ private:
     int efd;                                        // Epoll file descriptor
     std::unordered_map<int, int> client_to_server;  // Map client FD to server FD
     std::unordered_map<int, int> server_to_client;  // Map server FD to client FD
+    std::unordered_set<int> sent_initial;           // Clients that already sent initial message
     volatile std::sig_atomic_t &graceful_shutdown;  // Reference to variable for graceful shutdown
     std::ofstream logFile;                          // Log file object
     std::string pgAddress;                          // PostgreSQL server address
