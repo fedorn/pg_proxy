@@ -13,6 +13,8 @@ private:
     std::unordered_map<int, int> server_to_client;  // Map server FD to client FD
     volatile std::sig_atomic_t &graceful_shutdown;  // Reference to variable for graceful shutdown
     std::ofstream logFile;                          // Log file object
+    std::string pgAddress;                          // PostgreSQL server address
+    int pgPort;                                     // PostgreSQL server port
 
     void handleNewConnection();
 
@@ -21,7 +23,8 @@ private:
     static int set_nonblock(int fd);
 
 public:
-    explicit PostgreSQLProxy(int port, const std::string& logPath, volatile std::sig_atomic_t &graceful_shutdown);
+    explicit PostgreSQLProxy(std::string pgAddress, int pgPort, int proxyPort, const std::string &logPath,
+                             volatile std::sig_atomic_t &graceful_shutdown);
 
     ~PostgreSQLProxy();
 

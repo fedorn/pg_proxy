@@ -2,6 +2,7 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <utility>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
@@ -21,8 +22,9 @@ int PostgreSQLProxy::set_nonblock(int fd) {
 #endif
 }
 
-PostgreSQLProxy::PostgreSQLProxy(int port, const std::string& logPath, volatile std::sig_atomic_t &graceful_shutdown)
-        : logFile(logPath, std::ios::app), graceful_shutdown{graceful_shutdown} {
+PostgreSQLProxy::PostgreSQLProxy(std::string pgAddress, int pgPort, int proxyPort, const std::string &logPath,
+                                 volatile std::sig_atomic_t &graceful_shutdown)
+        : pgAddress(std::move(pgAddress)), pgPort(pgPort), logFile(logPath, std::ios::app), graceful_shutdown{graceful_shutdown} {
     // Open log file
     if (!logFile.is_open()) {
         std::cerr << "Failed to open log file: " << logPath << std::endl;
@@ -37,7 +39,7 @@ PostgreSQLProxy::PostgreSQLProxy(int port, const std::string& logPath, volatile 
     // Creating socket struct for this socket
     struct sockaddr_in sockAddr{};
     sockAddr.sin_family = AF_INET;
-    sockAddr.sin_port = htons(port);
+    sockAddr.sin_port = htons(proxyPort);
     sockAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     // Bind socket and address
@@ -61,7 +63,7 @@ PostgreSQLProxy::PostgreSQLProxy(int port, const std::string& logPath, volatile 
 
     // Work with epoll
     struct epoll_event event{};  // event
-    event.data.fd = listenSock;   // socket
+    event.data.fd = listenSock;  // socket
     event.events = EPOLLIN;      // event type
 
     // Create epoll descriptor
@@ -152,8 +154,8 @@ void PostgreSQLProxy::handleNewConnection() {
     int pgSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     struct sockaddr_in pgAddr{};
     pgAddr.sin_family = AF_INET;
-    pgAddr.sin_port = htons(5432);
-    pgAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    pgAddr.sin_port = htons(pgPort);
+    pgAddr.sin_addr.s_addr = inet_addr(pgAddress.c_str());
 
     if (connect(pgSock, (struct sockaddr *) &pgAddr, sizeof(pgAddr)) == -1) {
         std::cerr << "Connection to PostgreSQL failed. " << strerror(errno) << std::endl;
