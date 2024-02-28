@@ -2,22 +2,13 @@
 #include <netinet/in.h>
 #include <unordered_map>
 #include <iostream>
-#include <map>
-#include <string>
-#include <sstream>
-
-#include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
-// Other necessary includes...
 
-int set_nonblock(int fd)
-{
+int set_nonblock(int fd) {
     int flags;
 #if defined(O_NONBLOCK)
     if (-1 == (flags = fcntl(fd, F_GETFL, 0)))
@@ -29,8 +20,7 @@ int set_nonblock(int fd)
 #endif
 }
 
-class PostgreSQLProxy
-{
+class PostgreSQLProxy {
 private:
     int listen_fd;                                 // Listening socket file descriptor
     int efd;                                       // Epoll file descriptor
@@ -38,137 +28,125 @@ private:
     std::unordered_map<int, int> server_to_client; // Map server FD to client FD
 
 public:
-    PostgreSQLProxy(int port);
+    explicit PostgreSQLProxy(int port);
+
     ~PostgreSQLProxy();
-    void run();
+
+    [[noreturn]] void run();
+
     void handleNewConnection();
+
     void forwardData(int fd);
-    // Other methods...
 };
 
-PostgreSQLProxy::PostgreSQLProxy(int port)
-{
+PostgreSQLProxy::PostgreSQLProxy(int port) {
     // Initialize listening socket and epoll
     listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    // Создание описания адреса для этого сокета
-    struct sockaddr_in sockAddr;
+    // Creating socket struct for this socket
+    struct sockaddr_in sockAddr{};
     sockAddr.sin_family = AF_INET;
     sockAddr.sin_port = htons(port);
     sockAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    // Связывание сокета и адреса
-    if (bind(listen_fd, reinterpret_cast<struct sockaddr *>(&sockAddr), sizeof(sockAddr)) == -1)
-    {
+    // Bind socket and address
+    if (bind(listen_fd, reinterpret_cast<struct sockaddr *>(&sockAddr), sizeof(sockAddr)) == -1) {
         close(listen_fd);
         throw std::runtime_error("Bind failed");
     }
 
-    // Перевод сокета в неблокирующий режим
+    // Set socket to nonblocking mode
     set_nonblock(listen_fd);
 
-    // Перевод сокета в режим приема подключений
-    if (listen(listen_fd, SOMAXCONN) == -1)
-    {
+    // Set socket as listening for new connections
+    if (listen(listen_fd, SOMAXCONN) == -1) {
         close(listen_fd);
         throw std::runtime_error("Listen failed");
     }
 
-    // Работа с epoll
-    struct epoll_event event;  // событие
-    event.data.fd = listen_fd; // сокет
-    event.events = EPOLLIN;    // тип события
+    // Work with epoll
+    struct epoll_event event{};  // event
+    event.data.fd = listen_fd;   // socket
+    event.events = EPOLLIN;      // event type
 
-    // создание дескриптора epoll
+    // Create epoll descriptor
     efd = epoll_create1(0);
-    if (efd == -1)
-    {
+    if (efd == -1) {
         close(listen_fd);
         throw std::runtime_error("Epoll create failed");
     }
-    epoll_ctl(efd, EPOLL_CTL_ADD, listen_fd, &event); // добавление событя
+    epoll_ctl(efd, EPOLL_CTL_ADD, listen_fd, &event); // add event
 }
 
-PostgreSQLProxy::~PostgreSQLProxy()
-{
+PostgreSQLProxy::~PostgreSQLProxy() {
     close(efd);
     close(listen_fd);
 }
 
-void PostgreSQLProxy::run()
-{
-    // Теперь можно принимать и обрабатывать соединения
+[[noreturn]] void PostgreSQLProxy::run() {
+    // Now we can accept and process connections
     static const int maxEvents = 32;
-    while (true)
-    {
-        struct epoll_event events[maxEvents];               // массив для событий
-        int count = epoll_wait(efd, events, maxEvents, -1); // получение событий
+    while (true) {
+        struct epoll_event events[maxEvents];  // array for events
+        int count = epoll_wait(efd, events, maxEvents, -1); // wait for events
 
-        // Разбор полученных событий
-        for (int i = 0; i < count; ++i)
-        {
+        // Handling events
+        for (int i = 0; i < count; ++i) {
             struct epoll_event &e = events[i];
 
-            // Пришло событие от основного сокета
-            if (e.data.fd == listen_fd)
-            {
+            // We got event from the listening socket
+            if (e.data.fd == listen_fd) {
                 handleNewConnection();
             }
-            // Пришло событие от сокета клиентов или postgres
-            else
-            {
+                // We got event from client or postgres socket
+            else {
                 forwardData(e.data.fd);
             }
         }
     }
 }
 
-void PostgreSQLProxy::handleNewConnection()
-{
+void PostgreSQLProxy::handleNewConnection() {
     // Accept new connection and add to epoll
-    struct sockaddr_in newAddr;
+    struct sockaddr_in newAddr{};
     socklen_t length = sizeof(newAddr);
-    // Принятие соединения
+    // Accepting connection
     int newSocket = accept(listen_fd,
                            reinterpret_cast<sockaddr *>(&newAddr),
                            &length);
-    if (newSocket == -1)
-    {
+    if (newSocket == -1) {
         throw std::runtime_error("Accept client failed");
     }
-    set_nonblock(newSocket); // перевод в неблокирующий режим
+    set_nonblock(newSocket); // change to nonblocking mode
 
-    // Добавление сокета в epoll
-    struct epoll_event event;
+    // Add socket to epoll
+    struct epoll_event event{};
     event.data.fd = newSocket;
     event.events = EPOLLIN;
-    if (epoll_ctl(efd, EPOLL_CTL_ADD, newSocket, &event) == -1)
-    {
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, newSocket, &event) == -1) {
         throw std::runtime_error("Epoll add failed");
     }
 
     std::cout << "client " << newSocket << " connected." << std::endl;
 
-    // Добавление нового клиента
+    // Add new postgres socket
     int pgSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     struct sockaddr_in pgAddr
-    {
-    };
+            {
+            };
     pgAddr.sin_family = AF_INET;
     pgAddr.sin_port = htons(5432);
     pgAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    if (connect(pgSock, (struct sockaddr *)&pgAddr, sizeof(pgAddr)) == -1)
-    {
+    if (connect(pgSock, (struct sockaddr *) &pgAddr, sizeof(pgAddr)) == -1) {
         throw std::runtime_error("Connection to PostgreSQL failed");
     }
-    set_nonblock(pgSock); // перевод в неблокирующий режим
+    set_nonblock(pgSock); // change to nonblocking mode
 
-    // Добавление сокета в epoll
-    struct epoll_event pgEvent;
+    // Add postgres socket to epoll
+    struct epoll_event pgEvent{};
     pgEvent.data.fd = pgSock;
     pgEvent.events = EPOLLIN;
-    if (epoll_ctl(efd, EPOLL_CTL_ADD, pgSock, &pgEvent) == -1)
-    {
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, pgSock, &pgEvent) == -1) {
         throw std::runtime_error("Epoll add failed");
     }
 
@@ -176,75 +154,50 @@ void PostgreSQLProxy::handleNewConnection()
     server_to_client[pgSock] = newSocket;
 }
 
-void PostgreSQLProxy::forwardData(int fd)
-{
+void PostgreSQLProxy::forwardData(int fd) {
     // Read data from fd, log it, and forward to the corresponding FD
-    // Длина и буфер для приема
+    // Buffer and length for receiving data
     static const size_t length = 1024;
     static char buffer[length];
 
-    // Получение
-    int result = recv(fd, buffer, length - 1, MSG_NOSIGNAL);
+    // Receiving
+    ssize_t result = recv(fd, buffer, length - 1, MSG_NOSIGNAL);
 
-    // Клиент отключился
-    if (result == 0 && errno != EAGAIN)
-    {
-        // Закрытие соединения
+    // Client disconnected
+    if (result == 0 && errno != EAGAIN) {
+        // Closing connection
         shutdown(fd, SHUT_RDWR);
         close(fd);
 
-        // Создание текста сообщения об отключении
-        std::stringstream str;
-        std::cout << fd << " disconnected." << std::endl;
-
-        // Удаление клиента из контейнера
-        // clients.erase(e.data.fd);
+        if (auto itcs = client_to_server.find(fd); itcs != client_to_server.end()) {
+            shutdown(itcs->second, SHUT_RDWR);
+            close(itcs->second);
+            std::cout << "client " << fd << "and server " << itcs->second << " disconnected." << std::endl;
+            client_to_server.erase(itcs);
+        } else if (auto itsc = server_to_client.find(fd); itsc != server_to_client.end()) {
+            shutdown(itsc->second, SHUT_RDWR);
+            close(itsc->second);
+            std::cout << "client " << fd << "and server " << itsc->second << " disconnected." << std::endl;
+            server_to_client.erase(itsc);
+        }
     }
-    // Клиент прислал данные
-    else if (result > 0)
-    {
-        if (client_to_server.find(fd) != client_to_server.end())
-        {
-            std::cout << "send to server" << client_to_server[fd] << "from client " << fd << ' ' << result << " bytes : " << buffer << std::endl;
+        // Socket received data
+    else if (result > 0) {
+        if (client_to_server.find(fd) != client_to_server.end()) {
+            std::cout << "send to server" << client_to_server[fd] << "from client " << fd << ' ' << result
+                      << " bytes : " << buffer << std::endl;
             send(client_to_server[fd], buffer, result, MSG_NOSIGNAL);
-        }
-        else if (server_to_client.find(fd) != server_to_client.end())
-        {
-            std::cout << "send to client" << server_to_client[fd] << "from server " << fd << ' ' << result << " bytes : " << buffer << std::endl;
+        } else if (server_to_client.find(fd) != server_to_client.end()) {
+            std::cout << "send to client" << server_to_client[fd] << "from server " << fd << ' ' << result
+                      << " bytes : " << buffer << std::endl;
             send(server_to_client[fd], buffer, result, MSG_NOSIGNAL);
-        }
-        else
-        {
+        } else {
             throw std::runtime_error("Unknown descriptor");
         }
-
-        // Дописывание буфера для клиента
-        // buffer[result] = 0;
-
-        // Поиск завершения строки
-        // size_t position = c.Message.find("\r\n");
-        // if (position != std::string::npos)
-        // {
-        //     std::string message = c.Message.substr(0, position + 2);
-
-        //     std::stringstream str;
-        //     // str << c.Name << ": " << message;
-        //     str << message;
-
-        //     c.Message.erase(0, position + 2);
-
-        //     for (auto i = clients.begin();
-        //          i != clients.end(); ++i)
-        //     {
-        //         send(i->first, str.str().data(), str.str().length(), MSG_NOSIGNAL);
-        //     }
-        // }
     }
 }
 
-int main()
-{
-    PostgreSQLProxy proxy(5434); // Default PostgreSQL port
+int main() {
+    PostgreSQLProxy proxy(5434);
     proxy.run();
-    return 0;
 }
