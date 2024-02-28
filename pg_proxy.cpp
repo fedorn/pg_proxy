@@ -1,12 +1,12 @@
 #include <csignal>
 #include <iostream>
-#include "PostgreSQLProxy.h"
+#include "postgreSqlProxy.h"
 
 // Signal handling for graceful shutdown
-volatile std::sig_atomic_t graceful_shutdown = 0;
+volatile std::sig_atomic_t gracefulShutdown = 0;
 
-void signal_handler([[maybe_unused]] int signal) {
-    graceful_shutdown = 1;
+void signalHandler([[maybe_unused]] int signal) {
+    gracefulShutdown = 1;
 }
 
 int main(int argc, char *argv[]) {
@@ -19,9 +19,9 @@ int main(int argc, char *argv[]) {
     int pgPort = std::stoi(argv[2]);
     int proxyPort = std::stoi(argv[3]);
 
-    PostgreSQLProxy proxy(pgAddress, pgPort, proxyPort, "log.txt", graceful_shutdown);
+    postgreSqlProxy proxy(pgAddress, pgPort, proxyPort, "log.txt", gracefulShutdown);
     // Setup signal handling for graceful shutdown
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
     proxy.run();
 }

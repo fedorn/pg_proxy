@@ -1,4 +1,4 @@
-#include "PostgreSQLProxy.h"
+#include "postgreSqlProxy.h"
 #include <cerrno>
 #include <cstring>
 #include <iostream>
@@ -10,7 +10,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-int PostgreSQLProxy::set_nonblock(int fd) {
+int postgreSqlProxy::setNonblock(int fd) {
     int flags;
 #if defined(O_NONBLOCK)
     if (-1 == (flags = fcntl(fd, F_GETFL, 0)))
@@ -22,9 +22,9 @@ int PostgreSQLProxy::set_nonblock(int fd) {
 #endif
 }
 
-PostgreSQLProxy::PostgreSQLProxy(std::string pgAddress, int pgPort, int proxyPort, const std::string &logPath,
-                                 volatile std::sig_atomic_t &graceful_shutdown)
-        : pgAddress(std::move(pgAddress)), pgPort(pgPort), logFile(logPath, std::ios::app), graceful_shutdown{graceful_shutdown} {
+postgreSqlProxy::postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPort, const std::string &logPath,
+                                 volatile std::sig_atomic_t &gracefulShutdown)
+        : pgAddress(std::move(pgAddress)), pgPort(pgPort), logFile(logPath, std::ios::app), gracefulShutdown{gracefulShutdown} {
     // Open log file
     if (!logFile.is_open()) {
         std::cerr << "Failed to open log file: " << logPath << std::endl;
@@ -51,7 +51,7 @@ PostgreSQLProxy::PostgreSQLProxy(std::string pgAddress, int pgPort, int proxyPor
     }
 
     // Set socket to nonblocking mode
-    set_nonblock(listenSock);
+    setNonblock(listenSock);
 
     // Set socket as listening for new connections
     if (listen(listenSock, SOMAXCONN) == -1) {
@@ -83,16 +83,16 @@ PostgreSQLProxy::PostgreSQLProxy(std::string pgAddress, int pgPort, int proxyPor
     }
 }
 
-PostgreSQLProxy::~PostgreSQLProxy() {
+postgreSqlProxy::~postgreSqlProxy() {
     shutdown(listenSock, SHUT_RDWR);
     close(listenSock);
     close(efd);
 }
 
-void PostgreSQLProxy::run() {
+void postgreSqlProxy::run() {
     // Now we can accept and process connections
     static const int maxEvents = 32;
-    while (!graceful_shutdown) {
+    while (!gracefulShutdown) {
         struct epoll_event events[maxEvents];  // array for events
         int count = epoll_wait(efd, events, maxEvents, -1); // wait for events
 
@@ -113,17 +113,17 @@ void PostgreSQLProxy::run() {
 
     // Close all client/server connections before shutdown
     std::cout << "Shutting down gracefully." << std::endl;
-    for (auto &it: client_to_server) {
+    for (auto &it: clientToServer) {
         shutdown(it.first, SHUT_RDWR);
         close(it.first);
         shutdown(it.second, SHUT_RDWR);
         close(it.second);
     }
-    client_to_server.clear();
-    server_to_client.clear();
+    clientToServer.clear();
+    serverToClient.clear();
 }
 
-void PostgreSQLProxy::handleNewConnection() {
+void postgreSqlProxy::handleNewConnection() {
     // Accept new connection and add to epoll
     struct sockaddr_in newAddr{};
     socklen_t length = sizeof(newAddr);
@@ -135,7 +135,7 @@ void PostgreSQLProxy::handleNewConnection() {
         std::cerr << "Accept failed. " << strerror(errno) << std::endl;
         return;
     }
-    set_nonblock(newSocket); // change to nonblocking mode
+    setNonblock(newSocket); // change to nonblocking mode
 
     // Add socket to epoll
     struct epoll_event event{};
@@ -165,7 +165,7 @@ void PostgreSQLProxy::handleNewConnection() {
         close(pgSock);
         return;
     }
-    set_nonblock(pgSock); // change to nonblocking mode
+    setNonblock(pgSock); // change to nonblocking mode
 
     // Add postgres socket to epoll
     struct epoll_event pgEvent{};
@@ -180,11 +180,11 @@ void PostgreSQLProxy::handleNewConnection() {
         return;
     }
 
-    client_to_server[newSocket] = pgSock;
-    server_to_client[pgSock] = newSocket;
+    clientToServer[newSocket] = pgSock;
+    serverToClient[pgSock] = newSocket;
 }
 
-void PostgreSQLProxy::forwardData(int fd) {
+void postgreSqlProxy::forwardData(int fd) {
     // Read data from fd, log it, and forward to the corresponding FD
     // Buffer and length for receiving data
     static const size_t length = 1024;
@@ -201,24 +201,24 @@ void PostgreSQLProxy::forwardData(int fd) {
         shutdown(fd, SHUT_RDWR);
         close(fd);
 
-        if (auto itcs = client_to_server.find(fd); itcs != client_to_server.end()) {
+        if (auto itcs = clientToServer.find(fd); itcs != clientToServer.end()) {
             shutdown(itcs->second, SHUT_RDWR);
             close(itcs->second);
-            client_to_server.erase(itcs);
-        } else if (auto itsc = server_to_client.find(fd); itsc != server_to_client.end()) {
+            clientToServer.erase(itcs);
+        } else if (auto itsc = serverToClient.find(fd); itsc != serverToClient.end()) {
             shutdown(itsc->second, SHUT_RDWR);
             close(itsc->second);
-            server_to_client.erase(itsc);
+            serverToClient.erase(itsc);
         }
     }
         // Socket received data
     else if (result > 0) {
-        if (auto itcs = client_to_server.find(fd); itcs != client_to_server.end()) {
-            std::cout << "send to server " << client_to_server[fd] << " from client " << fd << ' ' << result
+        if (auto itcs = clientToServer.find(fd); itcs != clientToServer.end()) {
+            std::cout << "send to server " << clientToServer[fd] << " from client " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
             send(itcs->second, buffer, result, MSG_NOSIGNAL);
             // Ignore startup message that doesn't have initial byte
-            if (auto itsi = sent_initial.find(fd); itsi != sent_initial.end()) {
+            if (auto itsi = sentInitial.find(fd); itsi != sentInitial.end()) {
                 // Log queries
                 if (buffer[0] == 'Q') {
                     if (result < 5) {
@@ -231,10 +231,10 @@ void PostgreSQLProxy::forwardData(int fd) {
                 }
             }
             else {
-                sent_initial.insert(fd);
+                sentInitial.insert(fd);
             }
-        } else if (auto itsc = server_to_client.find(fd); itsc != server_to_client.end()) {
-            std::cout << "send to client " << server_to_client[fd] << " from server " << fd << ' ' << result
+        } else if (auto itsc = serverToClient.find(fd); itsc != serverToClient.end()) {
+            std::cout << "send to client " << serverToClient[fd] << " from server " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
             send(itsc->second, buffer, result, MSG_NOSIGNAL);
         } else {
