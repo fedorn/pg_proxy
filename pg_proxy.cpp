@@ -187,6 +187,13 @@ void PostgreSQLProxy::forwardData(int fd) {
             std::cout << "send to server " << client_to_server[fd] << " from client " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
             send(client_to_server[fd], buffer, result, MSG_NOSIGNAL);
+            // Log queries
+            // TODO: ignore startup message that doesn't have initial byte
+            // TODO: log to file
+            // TODO: make sure &buffer[5] ends with \0
+            if (buffer[0] == 'Q') {
+                std::cout << "Query: ===" << &buffer[5] << "===" << std::endl;
+            }
         } else if (server_to_client.find(fd) != server_to_client.end()) {
             std::cout << "send to client " << server_to_client[fd] << " from server " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
