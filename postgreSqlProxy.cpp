@@ -112,7 +112,6 @@ void postgreSqlProxy::run() {
     }
 
     // Close all client/server connections before shutdown
-    std::cout << "Shutting down gracefully." << std::endl;
     for (auto &it: clientToServer) {
         shutdown(it.first, SHUT_RDWR);
         close(it.first);
@@ -148,8 +147,6 @@ void postgreSqlProxy::handleNewConnection() {
         return;
     }
 
-    std::cout << "client " << newSocket << " connected." << std::endl;
-
     // Add new postgres socket
     int pgSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     struct sockaddr_in pgAddr{};
@@ -157,6 +154,7 @@ void postgreSqlProxy::handleNewConnection() {
     pgAddr.sin_port = htons(pgPort);
     pgAddr.sin_addr.s_addr = inet_addr(pgAddress.c_str());
 
+    // Might be better to use non-blocking connect here
     if (connect(pgSock, (struct sockaddr *) &pgAddr, sizeof(pgAddr)) == -1) {
         std::cerr << "Connection to PostgreSQL failed. " << strerror(errno) << std::endl;
         shutdown(newSocket, SHUT_RDWR);
@@ -170,7 +168,7 @@ void postgreSqlProxy::handleNewConnection() {
     // Add postgres socket to epoll
     struct epoll_event pgEvent{};
     pgEvent.data.fd = pgSock;
-    pgEvent.events = EPOLLIN;
+    pgEvent.events = EPOLLIN;  // Edge-triggered (EPOLLET) mode can be more efficient
     if (epoll_ctl(efd, EPOLL_CTL_ADD, pgSock, &pgEvent) == -1) {
         std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
         shutdown(newSocket, SHUT_RDWR);
@@ -186,6 +184,7 @@ void postgreSqlProxy::handleNewConnection() {
 
 void postgreSqlProxy::forwardData(int fd) {
     // Read data from fd, log it, and forward to the corresponding FD
+    // The buffer management can be improved here to handle things like backpressure or partial writes
     // Buffer and length for receiving data
     static const size_t length = 1024;
     static char buffer[length];
@@ -193,10 +192,8 @@ void postgreSqlProxy::forwardData(int fd) {
     // Receiving
     ssize_t result = recv(fd, buffer, length - 1, MSG_NOSIGNAL);
 
-    // Client disconnected
+    // Client disconnected or receive failed. Might be better to differentiate these cases.
     if (result <= 0 && errno != EAGAIN) {
-        std::cerr << "Received 0 bytes or receive failed, disconnecting. " << strerror(errno) << std::endl;
-
         // Closing connection
         shutdown(fd, SHUT_RDWR);
         close(fd);
@@ -214,8 +211,6 @@ void postgreSqlProxy::forwardData(int fd) {
         // Socket received data
     else if (result > 0) {
         if (auto itcs = clientToServer.find(fd); itcs != clientToServer.end()) {
-            std::cout << "send to server " << clientToServer[fd] << " from client " << fd << ' ' << result
-                      << " bytes : " << buffer << std::endl;
             send(itcs->second, buffer, result, MSG_NOSIGNAL);
             // Ignore startup message that doesn't have initial byte
             if (auto itsi = sentInitial.find(fd); itsi != sentInitial.end()) {
@@ -225,7 +220,6 @@ void postgreSqlProxy::forwardData(int fd) {
                         std::cerr << "Wrong Query message format." << std::endl;
                     } else {
                         buffer[result] = 0;  // Make sure &buffer[5] ends with \0
-                        std::cout << "Query: ===" << &buffer[5] << "===" << std::endl;
                         logFile << &buffer[5] << std::endl;
                     }
                 }
@@ -234,8 +228,6 @@ void postgreSqlProxy::forwardData(int fd) {
                 sentInitial.insert(fd);
             }
         } else if (auto itsc = serverToClient.find(fd); itsc != serverToClient.end()) {
-            std::cout << "send to client " << serverToClient[fd] << " from server " << fd << ' ' << result
-                      << " bytes : " << buffer << std::endl;
             send(itsc->second, buffer, result, MSG_NOSIGNAL);
         } else {
             std::cerr << "Unknown descriptor." << std::endl;
