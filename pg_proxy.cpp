@@ -4,12 +4,12 @@
 // Signal handling for graceful shutdown
 volatile std::sig_atomic_t graceful_shutdown = 0;
 
-void signal_handler(int signal) {
+void signal_handler([[maybe_unused]] int signal) {
     graceful_shutdown = 1;
 }
 
 int main() {
-    PostgreSQLProxy proxy(5434, graceful_shutdown);
+    PostgreSQLProxy proxy(5434, "log.txt", graceful_shutdown);
     // Setup signal handling for graceful shutdown
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);

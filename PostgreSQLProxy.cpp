@@ -21,8 +21,13 @@ int PostgreSQLProxy::set_nonblock(int fd) {
 #endif
 }
 
-PostgreSQLProxy::PostgreSQLProxy(int port, volatile std::sig_atomic_t &graceful_shutdown) : graceful_shutdown{
-        graceful_shutdown} {
+PostgreSQLProxy::PostgreSQLProxy(int port, const std::string& logPath, volatile std::sig_atomic_t &graceful_shutdown)
+        : logFile(logPath, std::ios::app), graceful_shutdown{graceful_shutdown} {
+    // Open log file
+    if (!logFile.is_open()) {
+        std::cerr << "Failed to open log file: " << logPath << std::endl;
+        throw std::runtime_error("Failed to open log file.");
+    }
     // Initialize listening socket and epoll
     listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSock == -1) {
@@ -187,8 +192,8 @@ void PostgreSQLProxy::forwardData(int fd) {
     ssize_t result = recv(fd, buffer, length - 1, MSG_NOSIGNAL);
 
     // Client disconnected
-    if (result == 0 && errno != EAGAIN) {
-        std::cerr << "Receive failed, disconnecting. " << strerror(errno) << std::endl;
+    if (result <= 0 && errno != EAGAIN) {
+        std::cerr << "Received 0 bytes or receive failed, disconnecting. " << strerror(errno) << std::endl;
 
         // Closing connection
         shutdown(fd, SHUT_RDWR);
@@ -216,6 +221,7 @@ void PostgreSQLProxy::forwardData(int fd) {
             // TODO: make sure &buffer[5] ends with \0
             if (buffer[0] == 'Q') {
                 std::cout << "Query: ===" << &buffer[5] << "===" << std::endl;
+                logFile << &buffer[5] << std::endl;
             }
         } else if (server_to_client.find(fd) != server_to_client.end()) {
             std::cout << "send to client " << server_to_client[fd] << " from server " << fd << ' ' << result
