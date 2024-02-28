@@ -184,11 +184,11 @@ void PostgreSQLProxy::forwardData(int fd) {
         // Socket received data
     else if (result > 0) {
         if (client_to_server.find(fd) != client_to_server.end()) {
-            std::cout << "send to server" << client_to_server[fd] << "from client " << fd << ' ' << result
+            std::cout << "send to server " << client_to_server[fd] << " from client " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
             send(client_to_server[fd], buffer, result, MSG_NOSIGNAL);
         } else if (server_to_client.find(fd) != server_to_client.end()) {
-            std::cout << "send to client" << server_to_client[fd] << "from server " << fd << ' ' << result
+            std::cout << "send to client " << server_to_client[fd] << " from server " << fd << ' ' << result
                       << " bytes : " << buffer << std::endl;
             send(server_to_client[fd], buffer, result, MSG_NOSIGNAL);
         } else {
