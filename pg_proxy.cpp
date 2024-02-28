@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <csignal>
+#include <cstring>
 
 int set_nonblock(int fd) {
     int flags;
@@ -22,26 +24,32 @@ int set_nonblock(int fd) {
 
 class PostgreSQLProxy {
 private:
-    int listen_fd;                                 // Listening socket file descriptor
+    int listenSock;                                 // Listening socket file descriptor
     int efd;                                       // Epoll file descriptor
     std::unordered_map<int, int> client_to_server; // Map client FD to server FD
     std::unordered_map<int, int> server_to_client; // Map server FD to client FD
-
-public:
-    explicit PostgreSQLProxy(int port);
-
-    ~PostgreSQLProxy();
-
-    [[noreturn]] void run();
+    volatile std::sig_atomic_t &graceful_shutdown;
 
     void handleNewConnection();
 
     void forwardData(int fd);
+
+public:
+    explicit PostgreSQLProxy(int port, volatile std::sig_atomic_t &graceful_shutdown);
+
+    ~PostgreSQLProxy();
+
+    [[noreturn]] void run();
 };
 
-PostgreSQLProxy::PostgreSQLProxy(int port) {
+PostgreSQLProxy::PostgreSQLProxy(int port, volatile std::sig_atomic_t &graceful_shutdown) : graceful_shutdown{
+        graceful_shutdown} {
     // Initialize listening socket and epoll
-    listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listenSock == -1) {
+        std::cerr << "Failed to create socket descriptor. " << strerror(errno) << std::endl;
+        throw std::runtime_error("Create socket failed");
+    }
     // Creating socket struct for this socket
     struct sockaddr_in sockAddr{};
     sockAddr.sin_family = AF_INET;
@@ -49,43 +57,56 @@ PostgreSQLProxy::PostgreSQLProxy(int port) {
     sockAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     // Bind socket and address
-    if (bind(listen_fd, reinterpret_cast<struct sockaddr *>(&sockAddr), sizeof(sockAddr)) == -1) {
-        close(listen_fd);
+    if (bind(listenSock, reinterpret_cast<struct sockaddr *>(&sockAddr), sizeof(sockAddr)) == -1) {
+        std::cerr << "Bind failed. " << strerror(errno) << std::endl;
+        shutdown(listenSock, SHUT_RDWR);
+        close(listenSock);
         throw std::runtime_error("Bind failed");
     }
 
     // Set socket to nonblocking mode
-    set_nonblock(listen_fd);
+    set_nonblock(listenSock);
 
     // Set socket as listening for new connections
-    if (listen(listen_fd, SOMAXCONN) == -1) {
-        close(listen_fd);
+    if (listen(listenSock, SOMAXCONN) == -1) {
+        std::cerr << "Listen failed. " << strerror(errno) << std::endl;
+        shutdown(listenSock, SHUT_RDWR);
+        close(listenSock);
         throw std::runtime_error("Listen failed");
     }
 
     // Work with epoll
     struct epoll_event event{};  // event
-    event.data.fd = listen_fd;   // socket
+    event.data.fd = listenSock;   // socket
     event.events = EPOLLIN;      // event type
 
     // Create epoll descriptor
     efd = epoll_create1(0);
     if (efd == -1) {
-        close(listen_fd);
+        std::cerr << "Epoll create failed. " << strerror(errno) << std::endl;
+        shutdown(listenSock, SHUT_RDWR);
+        close(listenSock);
         throw std::runtime_error("Epoll create failed");
     }
-    epoll_ctl(efd, EPOLL_CTL_ADD, listen_fd, &event); // add event
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, listenSock, &event) == -1) {  // add event
+        std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
+        shutdown(listenSock, SHUT_RDWR);
+        close(listenSock);
+        close(efd);
+        throw std::runtime_error("Epoll add failed");
+    }
 }
 
 PostgreSQLProxy::~PostgreSQLProxy() {
+    shutdown(listenSock, SHUT_RDWR);
+    close(listenSock);
     close(efd);
-    close(listen_fd);
 }
 
 [[noreturn]] void PostgreSQLProxy::run() {
     // Now we can accept and process connections
     static const int maxEvents = 32;
-    while (true) {
+    while (!graceful_shutdown) {
         struct epoll_event events[maxEvents];  // array for events
         int count = epoll_wait(efd, events, maxEvents, -1); // wait for events
 
@@ -94,7 +115,7 @@ PostgreSQLProxy::~PostgreSQLProxy() {
             struct epoll_event &e = events[i];
 
             // We got event from the listening socket
-            if (e.data.fd == listen_fd) {
+            if (e.data.fd == listenSock) {
                 handleNewConnection();
             }
                 // We got event from client or postgres socket
@@ -103,6 +124,17 @@ PostgreSQLProxy::~PostgreSQLProxy() {
             }
         }
     }
+
+    // Close all client/server connections before shutdown
+    std::cout << "Shutting down gracefully." << std::endl;
+    for (auto &it: client_to_server) {
+        shutdown(it.first, SHUT_RDWR);
+        close(it.first);
+        shutdown(it.second, SHUT_RDWR);
+        close(it.second);
+    }
+    client_to_server.clear();
+    server_to_client.clear();
 }
 
 void PostgreSQLProxy::handleNewConnection() {
@@ -110,11 +142,12 @@ void PostgreSQLProxy::handleNewConnection() {
     struct sockaddr_in newAddr{};
     socklen_t length = sizeof(newAddr);
     // Accepting connection
-    int newSocket = accept(listen_fd,
+    int newSocket = accept(listenSock,
                            reinterpret_cast<sockaddr *>(&newAddr),
                            &length);
     if (newSocket == -1) {
-        throw std::runtime_error("Accept client failed");
+        std::cerr << "Accept failed. " << strerror(errno) << std::endl;
+        return;
     }
     set_nonblock(newSocket); // change to nonblocking mode
 
@@ -123,22 +156,28 @@ void PostgreSQLProxy::handleNewConnection() {
     event.data.fd = newSocket;
     event.events = EPOLLIN;
     if (epoll_ctl(efd, EPOLL_CTL_ADD, newSocket, &event) == -1) {
-        throw std::runtime_error("Epoll add failed");
+        std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
+        shutdown(newSocket, SHUT_RDWR);
+        close(newSocket);
+        return;
     }
 
     std::cout << "client " << newSocket << " connected." << std::endl;
 
     // Add new postgres socket
     int pgSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-    struct sockaddr_in pgAddr
-            {
-            };
+    struct sockaddr_in pgAddr{};
     pgAddr.sin_family = AF_INET;
     pgAddr.sin_port = htons(5432);
     pgAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     if (connect(pgSock, (struct sockaddr *) &pgAddr, sizeof(pgAddr)) == -1) {
-        throw std::runtime_error("Connection to PostgreSQL failed");
+        std::cerr << "Connection to PostgreSQL failed. " << strerror(errno) << std::endl;
+        shutdown(newSocket, SHUT_RDWR);
+        close(newSocket);
+        shutdown(pgSock, SHUT_RDWR);
+        close(pgSock);
+        return;
     }
     set_nonblock(pgSock); // change to nonblocking mode
 
@@ -147,7 +186,12 @@ void PostgreSQLProxy::handleNewConnection() {
     pgEvent.data.fd = pgSock;
     pgEvent.events = EPOLLIN;
     if (epoll_ctl(efd, EPOLL_CTL_ADD, pgSock, &pgEvent) == -1) {
-        throw std::runtime_error("Epoll add failed");
+        std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
+        shutdown(newSocket, SHUT_RDWR);
+        close(newSocket);
+        shutdown(pgSock, SHUT_RDWR);
+        close(pgSock);
+        return;
     }
 
     client_to_server[newSocket] = pgSock;
@@ -165,6 +209,8 @@ void PostgreSQLProxy::forwardData(int fd) {
 
     // Client disconnected
     if (result == 0 && errno != EAGAIN) {
+        std::cerr << "Receive failed, disconnecting. " << strerror(errno) << std::endl;
+
         // Closing connection
         shutdown(fd, SHUT_RDWR);
         close(fd);
@@ -172,12 +218,10 @@ void PostgreSQLProxy::forwardData(int fd) {
         if (auto itcs = client_to_server.find(fd); itcs != client_to_server.end()) {
             shutdown(itcs->second, SHUT_RDWR);
             close(itcs->second);
-            std::cout << "client " << fd << "and server " << itcs->second << " disconnected." << std::endl;
             client_to_server.erase(itcs);
         } else if (auto itsc = server_to_client.find(fd); itsc != server_to_client.end()) {
             shutdown(itsc->second, SHUT_RDWR);
             close(itsc->second);
-            std::cout << "client " << fd << "and server " << itsc->second << " disconnected." << std::endl;
             server_to_client.erase(itsc);
         }
     }
@@ -199,12 +243,22 @@ void PostgreSQLProxy::forwardData(int fd) {
                       << " bytes : " << buffer << std::endl;
             send(server_to_client[fd], buffer, result, MSG_NOSIGNAL);
         } else {
-            throw std::runtime_error("Unknown descriptor");
+            std::cerr << "Unknown descriptor." << std::endl;
         }
     }
 }
 
+// Signal handling for graceful shutdown
+volatile std::sig_atomic_t graceful_shutdown = 0;
+
+void signal_handler(int signal) {
+    graceful_shutdown = 1;
+}
+
 int main() {
-    PostgreSQLProxy proxy(5434);
+    PostgreSQLProxy proxy(5434, graceful_shutdown);
+    // Setup signal handling for graceful shutdown
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
     proxy.run();
 }
