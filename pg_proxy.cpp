@@ -10,17 +10,6 @@
 #include <csignal>
 #include <cstring>
 
-int set_nonblock(int fd) {
-    int flags;
-#if defined(O_NONBLOCK)
-    if (-1 == (flags = fcntl(fd, F_GETFL, 0)))
-        flags = 0;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-#else
-    flags = 1;
-    return ioctl(fd, FIOBIO, &flags);
-#endif
-}
 
 class PostgreSQLProxy {
 private:
@@ -34,13 +23,27 @@ private:
 
     void forwardData(int fd);
 
+    static int set_nonblock(int fd);
+
 public:
     explicit PostgreSQLProxy(int port, volatile std::sig_atomic_t &graceful_shutdown);
 
     ~PostgreSQLProxy();
 
-    [[noreturn]] void run();
+    void run();
 };
+
+int PostgreSQLProxy::set_nonblock(int fd) {
+    int flags;
+#if defined(O_NONBLOCK)
+    if (-1 == (flags = fcntl(fd, F_GETFL, 0)))
+        flags = 0;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#else
+    flags = 1;
+    return ioctl(fd, FIOBIO, &flags);
+#endif
+}
 
 PostgreSQLProxy::PostgreSQLProxy(int port, volatile std::sig_atomic_t &graceful_shutdown) : graceful_shutdown{
         graceful_shutdown} {
@@ -103,7 +106,7 @@ PostgreSQLProxy::~PostgreSQLProxy() {
     close(efd);
 }
 
-[[noreturn]] void PostgreSQLProxy::run() {
+void PostgreSQLProxy::run() {
     // Now we can accept and process connections
     static const int maxEvents = 32;
     while (!graceful_shutdown) {
