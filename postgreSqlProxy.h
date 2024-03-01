@@ -24,6 +24,9 @@ private:
 
     static int setNonblock(int fd);
 
+    template<typename... Sockets>
+    void closeSockets(int sock, Sockets... rest);
+
 public:
     explicit postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPort, const std::string &logPath,
                              volatile std::sig_atomic_t &gracefulShutdown);

@@ -22,9 +22,23 @@ int postgreSqlProxy::setNonblock(int fd) {
 #endif
 }
 
+template<typename... Sockets>
+void postgreSqlProxy::closeSockets(int sock, Sockets... rest) {
+    if (sock != -1) {
+        shutdown(sock, SHUT_RDWR); // Shutdown both read and write operations
+        close(sock); // Close the socket
+    }
+
+    // If there are more sockets, close them recursively
+    if constexpr (sizeof...(rest) > 0) {
+        closeSockets(rest...);
+    }
+}
+
 postgreSqlProxy::postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPort, const std::string &logPath,
                                  volatile std::sig_atomic_t &gracefulShutdown)
-        : pgAddress(std::move(pgAddress)), pgPort(pgPort), logFile(logPath, std::ios::app), gracefulShutdown{gracefulShutdown} {
+        : pgAddress(std::move(pgAddress)), pgPort(pgPort), logFile(logPath, std::ios::app),
+          gracefulShutdown{gracefulShutdown} {
     // Open log file
     if (!logFile.is_open()) {
         std::cerr << "Failed to open log file: " << logPath << std::endl;
@@ -45,8 +59,7 @@ postgreSqlProxy::postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPor
     // Bind socket and address
     if (bind(listenSock, reinterpret_cast<struct sockaddr *>(&sockAddr), sizeof(sockAddr)) == -1) {
         std::cerr << "Bind failed. " << strerror(errno) << std::endl;
-        shutdown(listenSock, SHUT_RDWR);
-        close(listenSock);
+        closeSockets(listenSock);
         throw std::runtime_error("Bind failed");
     }
 
@@ -56,8 +69,7 @@ postgreSqlProxy::postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPor
     // Set socket as listening for new connections
     if (listen(listenSock, SOMAXCONN) == -1) {
         std::cerr << "Listen failed. " << strerror(errno) << std::endl;
-        shutdown(listenSock, SHUT_RDWR);
-        close(listenSock);
+        closeSockets(listenSock);
         throw std::runtime_error("Listen failed");
     }
 
@@ -70,22 +82,19 @@ postgreSqlProxy::postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPor
     efd = epoll_create1(0);
     if (efd == -1) {
         std::cerr << "Epoll create failed. " << strerror(errno) << std::endl;
-        shutdown(listenSock, SHUT_RDWR);
-        close(listenSock);
+        closeSockets(listenSock);
         throw std::runtime_error("Epoll create failed");
     }
     if (epoll_ctl(efd, EPOLL_CTL_ADD, listenSock, &event) == -1) {  // add event
         std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
-        shutdown(listenSock, SHUT_RDWR);
-        close(listenSock);
+        closeSockets(listenSock);
         close(efd);
         throw std::runtime_error("Epoll add failed");
     }
 }
 
 postgreSqlProxy::~postgreSqlProxy() {
-    shutdown(listenSock, SHUT_RDWR);
-    close(listenSock);
+    closeSockets(listenSock);
     close(efd);
 }
 
@@ -113,13 +122,11 @@ void postgreSqlProxy::run() {
 
     // Close all client/server connections before shutdown
     for (auto &it: clientToServer) {
-        shutdown(it.first, SHUT_RDWR);
-        close(it.first);
-        shutdown(it.second, SHUT_RDWR);
-        close(it.second);
+        closeSockets(it.first, it.second);
     }
     clientToServer.clear();
     serverToClient.clear();
+    sentInitial.clear();
 }
 
 void postgreSqlProxy::handleNewConnection() {
@@ -142,8 +149,7 @@ void postgreSqlProxy::handleNewConnection() {
     event.events = EPOLLIN;
     if (epoll_ctl(efd, EPOLL_CTL_ADD, newSocket, &event) == -1) {
         std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
-        shutdown(newSocket, SHUT_RDWR);
-        close(newSocket);
+        closeSockets(newSocket);
         return;
     }
 
@@ -157,10 +163,7 @@ void postgreSqlProxy::handleNewConnection() {
     // Might be better to use non-blocking connect here
     if (connect(pgSock, (struct sockaddr *) &pgAddr, sizeof(pgAddr)) == -1) {
         std::cerr << "Connection to PostgreSQL failed. " << strerror(errno) << std::endl;
-        shutdown(newSocket, SHUT_RDWR);
-        close(newSocket);
-        shutdown(pgSock, SHUT_RDWR);
-        close(pgSock);
+        closeSockets(newSocket, pgSock);
         return;
     }
     setNonblock(pgSock); // change to nonblocking mode
@@ -171,10 +174,7 @@ void postgreSqlProxy::handleNewConnection() {
     pgEvent.events = EPOLLIN;  // Edge-triggered (EPOLLET) mode can be more efficient
     if (epoll_ctl(efd, EPOLL_CTL_ADD, pgSock, &pgEvent) == -1) {
         std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
-        shutdown(newSocket, SHUT_RDWR);
-        close(newSocket);
-        shutdown(pgSock, SHUT_RDWR);
-        close(pgSock);
+        closeSockets(newSocket, pgSock);
         return;
     }
 
@@ -192,26 +192,27 @@ void postgreSqlProxy::forwardData(int fd) {
     // Receiving
     ssize_t result = recv(fd, buffer, length - 1, MSG_NOSIGNAL);
 
-    // Client disconnected or receive failed. Might be better to differentiate these cases.
-    if (result <= 0 && errno != EAGAIN) {
+    // Client disconnected or receive failed.
+    if (result == 0 || (result == -1 && errno != EAGAIN)) {
+        if (result == -1) {
+            std::cerr << "Receive failed. " << strerror(errno) << std::endl;
+        }
         // Closing connection
-        shutdown(fd, SHUT_RDWR);
-        close(fd);
+        closeSockets(fd);
+        sentInitial.erase(fd);
 
         if (auto itcs = clientToServer.find(fd); itcs != clientToServer.end()) {
-            shutdown(itcs->second, SHUT_RDWR);
-            close(itcs->second);
+            closeSockets(itcs->second);
             clientToServer.erase(itcs);
         } else if (auto itsc = serverToClient.find(fd); itsc != serverToClient.end()) {
-            shutdown(itsc->second, SHUT_RDWR);
-            close(itsc->second);
+            closeSockets(itsc->second);
             serverToClient.erase(itsc);
         }
     }
         // Socket received data
     else if (result > 0) {
         if (auto itcs = clientToServer.find(fd); itcs != clientToServer.end()) {
-            send(itcs->second, buffer, result, MSG_NOSIGNAL);
+            send(itcs->second, buffer, result, MSG_NOSIGNAL);  // We don't handle partial writes here
             // Ignore startup message that doesn't have initial byte
             if (auto itsi = sentInitial.find(fd); itsi != sentInitial.end()) {
                 // Log queries
@@ -223,12 +224,11 @@ void postgreSqlProxy::forwardData(int fd) {
                         logFile << &buffer[5] << std::endl;
                     }
                 }
-            }
-            else {
+            } else {
                 sentInitial.insert(fd);
             }
         } else if (auto itsc = serverToClient.find(fd); itsc != serverToClient.end()) {
-            send(itsc->second, buffer, result, MSG_NOSIGNAL);
+            send(itsc->second, buffer, result, MSG_NOSIGNAL);  // We don't handle partial writes here
         } else {
             std::cerr << "Unknown descriptor." << std::endl;
         }
