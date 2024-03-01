@@ -74,9 +74,9 @@ postgreSqlProxy::postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPor
     }
 
     // Work with epoll
-    struct epoll_event event{};  // event
-    event.data.fd = listenSock;  // socket
-    event.events = EPOLLIN;      // event type
+    struct epoll_event event{}; // event
+    event.data.fd = listenSock; // socket
+    event.events = EPOLLIN;     // event type
 
     // Create epoll descriptor
     efd = epoll_create1(0);
@@ -85,7 +85,7 @@ postgreSqlProxy::postgreSqlProxy(std::string pgAddress, int pgPort, int proxyPor
         closeSockets(listenSock);
         throw std::runtime_error("Epoll create failed");
     }
-    if (epoll_ctl(efd, EPOLL_CTL_ADD, listenSock, &event) == -1) {  // add event
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, listenSock, &event) == -1) { // add event
         std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
         closeSockets(listenSock);
         close(efd);
@@ -102,7 +102,7 @@ void postgreSqlProxy::run() {
     // Now we can accept and process connections
     static const int maxEvents = 32;
     while (!gracefulShutdown) {
-        struct epoll_event events[maxEvents];  // array for events
+        struct epoll_event events[maxEvents]; // array for events
         int count = epoll_wait(efd, events, maxEvents, -1); // wait for events
 
         // Handling events
@@ -171,7 +171,7 @@ void postgreSqlProxy::handleNewConnection() {
     // Add postgres socket to epoll
     struct epoll_event pgEvent{};
     pgEvent.data.fd = pgSock;
-    pgEvent.events = EPOLLIN;  // Edge-triggered (EPOLLET) mode can be more efficient
+    pgEvent.events = EPOLLIN; // Edge-triggered (EPOLLET) mode can be more efficient
     if (epoll_ctl(efd, EPOLL_CTL_ADD, pgSock, &pgEvent) == -1) {
         std::cerr << "Epoll add failed. " << strerror(errno) << std::endl;
         closeSockets(newSocket, pgSock);
@@ -212,7 +212,7 @@ void postgreSqlProxy::forwardData(int fd) {
         // Socket received data
     else if (result > 0) {
         if (auto itcs = clientToServer.find(fd); itcs != clientToServer.end()) {
-            send(itcs->second, buffer, result, MSG_NOSIGNAL);  // We don't handle partial writes here
+            send(itcs->second, buffer, result, MSG_NOSIGNAL); // We don't handle partial writes here
             // Ignore startup message that doesn't have initial byte
             if (auto itsi = sentInitial.find(fd); itsi != sentInitial.end()) {
                 // Log queries
@@ -220,7 +220,7 @@ void postgreSqlProxy::forwardData(int fd) {
                     if (result < 5) {
                         std::cerr << "Wrong Query message format." << std::endl;
                     } else {
-                        buffer[result] = 0;  // Make sure &buffer[5] ends with \0
+                        buffer[result] = 0; // Make sure &buffer[5] ends with \0
                         logFile << &buffer[5] << std::endl;
                     }
                 }
@@ -228,7 +228,7 @@ void postgreSqlProxy::forwardData(int fd) {
                 sentInitial.insert(fd);
             }
         } else if (auto itsc = serverToClient.find(fd); itsc != serverToClient.end()) {
-            send(itsc->second, buffer, result, MSG_NOSIGNAL);  // We don't handle partial writes here
+            send(itsc->second, buffer, result, MSG_NOSIGNAL); // We don't handle partial writes here
         } else {
             std::cerr << "Unknown descriptor." << std::endl;
         }

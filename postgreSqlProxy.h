@@ -8,15 +8,15 @@
 
 class postgreSqlProxy {
 private:
-    int listenSock;                                 // Listening socket file descriptor
-    int efd;                                        // Epoll file descriptor
+    int listenSock;                               // Listening socket file descriptor
+    int efd;                                      // Epoll file descriptor
     std::unordered_map<int, int> clientToServer;  // Map client FD to server FD
     std::unordered_map<int, int> serverToClient;  // Map server FD to client FD
-    std::unordered_set<int> sentInitial;           // Clients that already sent initial message
-    volatile std::sig_atomic_t &gracefulShutdown;  // Reference to variable for graceful shutdown
-    std::ofstream logFile;                          // Log file object
-    std::string pgAddress;                          // PostgreSQL server address
-    int pgPort;                                     // PostgreSQL server port
+    std::unordered_set<int> sentInitial;          // Clients that already sent initial message
+    volatile std::sig_atomic_t &gracefulShutdown; // Reference to variable for graceful shutdown
+    std::ofstream logFile;                        // Log file object
+    std::string pgAddress;                        // PostgreSQL server address
+    int pgPort;                                   // PostgreSQL server port
 
     void handleNewConnection();
 
