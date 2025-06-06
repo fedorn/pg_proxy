@@ -104,6 +104,16 @@ void postgreSqlProxy::run() {
     while (!gracefulShutdown) {
         struct epoll_event events[maxEvents]; // array for events
         int count = epoll_wait(efd, events, maxEvents, -1); // wait for events
+        if (count == -1) {
+            if (errno == EINTR) {
+                // epoll_wait was interrupted by a signal. Continue the loop
+                // to check the gracefulShutdown flag.
+                continue;
+            } else {
+                std::cerr << "epoll_wait failed. " << strerror(errno) << std::endl;
+                break;
+            }
+        }
 
         // Handling events
         for (int i = 0; i < count; ++i) {
